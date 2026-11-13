@@ -224,14 +224,7 @@ async def process_video(file: UploadFile = File(...)):
         
         x_offset = screen_width - thumb_w - 20  # 20px from the right edge
         y_offset = screen_height - thumb_h - 20 # 20px from the bottom edge
-    
-    frame_number = 0
-    current_subtitle = None
-    current_info = None
-    last_drawn_sub = None
-    last_drawn_info = None
-    last_drawn_frame = None
-    
+
     while cap.isOpened():
         ret, frame = cap.read()
         if ret:
@@ -242,23 +235,13 @@ async def process_video(file: UploadFile = File(...)):
                 if frame_number >= timestamps[0] and frame_number <= timestamps[1]:
                     current_subtitle = segment["text"]
                     current_info = segment["words"]
-                    
-            if current_subtitle != last_drawn_sub or current_info != last_drawn_info:
-                if current_subtitle:
-                    frame = draw_subtitle(frame, current_subtitle, subtitle_font_size, (255,255,255))
-                if current_info:
-                    frame = draw_entries(frame, current_info, dictionary_font_size, (255,255,255))
-            
-                last_drawn_frame = frame.copy() 
-                last_drawn_sub = current_subtitle
-                last_drawn_info = current_info
-            else:
-                if last_drawn_frame is not None:
-                    frame = last_drawn_frame.copy()
-                
+            if current_subtitle:
+                frame = draw_subtitle(frame, current_subtitle, subtitle_font_size, (255,255,255))
+            if current_info:
+                frame = draw_entries(frame, current_info, dictionary_font_size, (255,255,255))
+            frame_number += 1
             if thumb is not None:
                 frame[y_offset:y_offset+thumb_h, x_offset:x_offset+thumb_w] = thumb
-            frame_number += 1
             output.write(frame)
         else:
             break
