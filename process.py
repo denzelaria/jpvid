@@ -85,11 +85,8 @@ async def process_video(file: UploadFile = File(...)):
 
     jam = Jamdict()
     t = Tokenizer()
-    device = "cpu"
-    batch_size = 16
-    compute_type = "int8"
     content = []
-
+    
     transcribe(
         audio_file=audio_file,
         output_file="assets/in-between/output.vtt",
@@ -173,7 +170,7 @@ async def process_video(file: UploadFile = File(...)):
         font_path = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
         font = ImageFont.truetype(font_path, font_size)
         
-        textY = subtitle_font_size * 2
+        textY = subtitle_font_size * 1.2
         for i, entry in enumerate(entries):
             line = entry["word"] + ": " + entry["kana"]
             textY += font_size + 6
@@ -218,7 +215,23 @@ async def process_video(file: UploadFile = File(...)):
     frame_number = 0
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     output = cv2.VideoWriter(f"assets/in-between/{input_name}_output_temp.mp4", fourcc, fps, (screen_width, screen_height))
-
+    thumb = cv2.imread("assets/images/logo.png")
+    if thumb is not None:
+        # Resize it so it's 15% of the screen width
+        thumb_w = int(screen_width * 0.15)
+        thumb_h = int(thumb.shape[0] * (thumb_w / thumb.shape[1]))
+        thumb = cv2.resize(thumb, (thumb_w, thumb_h))
+        
+        x_offset = screen_width - thumb_w - 20  # 20px from the right edge
+        y_offset = screen_height - thumb_h - 20 # 20px from the bottom edge
+    
+    frame_number = 0
+    current_subtitle = None
+    current_info = None
+    last_drawn_sub = None
+    last_drawn_info = None
+    last_drawn_frame = None
+    
     while cap.isOpened():
         ret, frame = cap.read()
         if ret:
@@ -229,10 +242,22 @@ async def process_video(file: UploadFile = File(...)):
                 if frame_number >= timestamps[0] and frame_number <= timestamps[1]:
                     current_subtitle = segment["text"]
                     current_info = segment["words"]
-            if current_subtitle:
-                frame = draw_subtitle(frame, current_subtitle, subtitle_font_size, (255,255,255))
-            if current_info:
-                frame = draw_entries(frame, current_info, dictionary_font_size, (255,255,255))
+                    
+            if current_subtitle != last_drawn_sub or current_info != last_drawn_info:
+                if current_subtitle:
+                    frame = draw_subtitle(frame, current_subtitle, subtitle_font_size, (255,255,255))
+                if current_info:
+                    frame = draw_entries(frame, current_info, dictionary_font_size, (255,255,255))
+            
+                last_drawn_frame = frame.copy() 
+                last_drawn_sub = current_subtitle
+                last_drawn_info = current_info
+            else:
+                if last_drawn_frame is not None:
+                    frame = last_drawn_frame.copy()
+                
+            if thumb is not None:
+                frame[y_offset:y_offset+thumb_h, x_offset:x_offset+thumb_w] = thumb
             frame_number += 1
             output.write(frame)
         else:
