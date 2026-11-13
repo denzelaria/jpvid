@@ -20,6 +20,8 @@ os.makedirs(IN_BETWEEN, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(INPUT_DIR, exist_ok=True)
 
+FONT_PATH = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
+
 STOP_POS_MAJOR = {
     "助詞",      # particles: は, が, を, に, で
     "助動詞",    # auxiliary verbs: です, ます, た, ない
@@ -162,89 +164,137 @@ async def process_video(file: UploadFile = File(...)):
     dictionary_font_size = int(base_size * 0.04)
     subtitle_font_size = int(base_size * 0.05) * 1.25
     
-    def draw_entries(img, entries, font_size, color):    
-        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        img_pil = Image.fromarray(img_rgb)
-        overlay = Image.new('RGBA', img_pil.size, (0, 0, 0, 0))
-        draw = ImageDraw.Draw(overlay)
-        font_path = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
-        font = ImageFont.truetype(font_path, font_size)
-        
-        textY = subtitle_font_size * 1.2
-        for i, entry in enumerate(entries):
-            line = entry["word"] + ": " + entry["kana"]
-            textY += font_size + 6
-            bbox = draw.textbbox((20, textY), line, font=font)
-            draw.rectangle([bbox[0], bbox[1], bbox[2], bbox[3]], fill=(0,0,0,int(255*0.5)), width=3)
-            draw.text((20, textY), line, fill=color[::-1], font=font) 
-            
-            textY += font_size
-            bbox = draw.textbbox((20, textY), entry["translation"], font=font)
-            draw.rectangle([bbox[0], bbox[1], bbox[2], bbox[3]], fill=(0,0,0,int(255*0.5)), width=3)
-            draw.text((20, textY), entry["translation"], fill=color[::-1], font=font)
-            
-            textY += font_size + 3
-        
-        img_pil = Image.alpha_composite(img_pil.convert('RGBA'), overlay)
+    def make_fonts(base_size):
+        return (
+            ImageFont.truetype(FONT_PATH, int(base_size * 0.04)),   # dictionary
+            ImageFont.truetype(FONT_PATH, int(base_size * 0.05 * 1.25)),  # subtitle
+        )
     
-        return cv2.cvtColor(np.array(img_pil.convert("RGB")), cv2.COLOR_RGB2BGR)
-    
-    def draw_subtitle(img, text, font_size, color):    
-        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        img_pil = Image.fromarray(img_rgb)
-        overlay = Image.new('RGBA', img_pil.size, (0,0,0,0))
-        draw = ImageDraw.Draw(overlay)
-        
-        font_path = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
-        font = ImageFont.truetype(font_path, font_size)
-        char_bbox = draw.textbbox((0,0), "あ", font=font)
-        char_width = char_bbox[2] - char_bbox[0]
-        lines = textwrap.wrap(text, width=int(screen_width / (char_width))) 
-        
-        for i, line in enumerate(lines):
-            bbox = draw.textbbox((0,0), line, font=font)
-            width = bbox[2] - bbox[0]
-            textX = (screen_width - (width)) / 2
-            textY = 10 + (font_size+6)*i
-            bbox = draw.textbbox((textX,textY), line, font=font)
-            draw.rectangle([bbox[0],bbox[1],bbox[2],bbox[3]], fill=(0,0,0,int(255*0.5)), width=3)
-            draw.text((textX, textY), line, fill=color[::-1], font=font)
-        img_pil = Image.alpha_composite(img_pil.convert('RGBA'), overlay)
-        return cv2.cvtColor(np.array(img_pil.convert("RGB")), cv2.COLOR_RGB2BGR)
+    def composite_roi(frame_bgr, overlay_rgba, bbox):
+        if overlay_rgba is None:
+            return frame_bgr
+        x0, y0, x1, y1 = bbox
+        h, w = frame_bgr.shape[:2]
+        x0 = max(0, x0); y0 = max(0, y0); x1 = min(w, x1); y1 = min(h, y1)
+        if x1 <= x0 or y1 <= y0:
+            return frame_bgr
 
-    frame_number = 0
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    output = cv2.VideoWriter(f"assets/in-between/{input_name}_output_temp.mp4", fourcc, fps, (screen_width, screen_height))
+        ov = np.asarray(overlay_rgba)[y0:y1, x0:x1]   # (h, w, 4) RGBA
+        alpha = ov[..., 3:4].astype(np.float32) / 255.0
+        rgb = ov[..., :3].astype(np.float32)           # RGB
+        roi = frame_bgr[y0:y1, x0:x1].astype(np.float32)  # BGR
+        # blend: out_bgr = roi*(1-a) + rgb_bgr*a  -> swap RGB<->BGR
+        blended = roi * (1.0 - alpha) + rgb[..., ::-1] * alpha
+        frame_bgr[y0:y1, x0:x1] = blended.astype(np.uint8)
+        return frame_bgr
+
+    def build_overlay(screen_width, screen_height, subtitle, entries, subtitle_font, dict_font):
+        overlay = Image.new('RGBA', (screen_width, screen_height), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
+        x0, y0, x1, y1 = screen_width, screen_height, 0, 0
+
+        def mark(bbox):
+            nonlocal x0, y0, x1, y1
+            x0 = min(x0, bbox[0]); y0 = min(y0, bbox[1])
+            x1 = max(x1, bbox[2]); y1 = max(y1, bbox[3])
+
+        WHITE = (255, 255, 255, 255)
+        BLACK_HALF = (0, 0, 0, int(255 * 0.5))
+        PAD = 3
+
+        if subtitle:
+            char_bbox = draw.textbbox((0, 0), "あ", font=subtitle_font)
+            char_width = char_bbox[2] - char_bbox[0]
+            lines = textwrap.wrap(subtitle, width=int(screen_width / char_width))
+
+            for i, line in enumerate(lines):
+                bbox = draw.textbbox((0, 0), line, font=subtitle_font)
+                width = bbox[2] - bbox[0]
+                textX = (screen_width - width) // 2
+                textY = 10 + (subtitle_font.size + 6) * i
+                bb = draw.textbbox((textX, textY), line, font=subtitle_font)
+                bb = (bb[0] - PAD, bb[1] - PAD, bb[2] + PAD, bb[3] + PAD)
+                draw.rectangle(bb, fill=BLACK_HALF)
+                draw.text((textX, textY), line, fill=WHITE, font=subtitle_font)
+                mark(bb)
+
+        if entries:
+            textY = subtitle_font.size * 1.1
+            for entry in entries:
+                line = entry["word"] + ": " + entry["kana"]
+                textY += dict_font.size + 6
+                bb = draw.textbbox((20, textY), line, font=dict_font)
+                bb = (bb[0] - PAD, bb[1] - PAD, bb[2] + PAD, bb[3] + PAD)
+                draw.rectangle(bb, fill=BLACK_HALF)
+                draw.text((20, textY), line, fill=WHITE, font=dict_font)
+                mark(bb)
+
+                textY += dict_font.size
+                bb = draw.textbbox((20, textY), entry["translation"], font=dict_font)
+                bb = (bb[0] - PAD, bb[1] - PAD, bb[2] + PAD, bb[3] + PAD)
+                draw.rectangle(bb, fill=BLACK_HALF)
+                draw.text((20, textY), entry["translation"], fill=WHITE, font=dict_font)
+                mark(bb)
+                textY += dict_font.size + 3
+
+        if x1 <= x0 or y1 <= y0:
+            return None, None
+        return overlay, (int(x0), int(y0), int(x1), int(y1))
+        
+    FONT_PATH = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
+
+    dict_font, sub_font = make_fonts(base_size)
+
+    cues = []
+    for seg in content:
+        ov, bb = build_overlay(screen_width, screen_height, seg["text"], seg["words"],
+                            sub_font, dict_font)
+        cues.append({
+            "start": seg["timestamps"][0],
+            "end":   seg["timestamps"][1],
+            "overlay": None if ov is None else np.asarray(ov),   # RGBA ndarray
+            "bbox": bb,
+        })
+    cues.sort(key=lambda c: c["start"])
+
+    # Pre-place logo bounds
+    logo_roi = None
     thumb = cv2.imread("assets/images/logo.png")
     if thumb is not None:
-        # Resize it so it's 15% of the screen width
         thumb_w = int(screen_width * 0.15)
         thumb_h = int(thumb.shape[0] * (thumb_w / thumb.shape[1]))
         thumb = cv2.resize(thumb, (thumb_w, thumb_h))
-        
-        x_offset = screen_width - thumb_w - 20  # 20px from the right edge
-        y_offset = screen_height - thumb_h - 20 # 20px from the bottom edge
+        x_offset = screen_width - thumb_w - 20
+        y_offset = screen_height - thumb_h - 20
+        logo_roi = (x_offset, y_offset, x_offset + thumb_w, y_offset + thumb_h)
 
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    output = cv2.VideoWriter(f"assets/in-between/{input_name}_output_temp.mp4",
+                            fourcc, fps, (screen_width, screen_height))
+
+    frame_number = 0
+    cue_idx = 0
+    active = None 
     while cap.isOpened():
         ret, frame = cap.read()
-        if ret:
-            current_subtitle = None
-            current_info = None
-            for segment in content:
-                timestamps = segment["timestamps"]
-                if frame_number >= timestamps[0] and frame_number <= timestamps[1]:
-                    current_subtitle = segment["text"]
-                    current_info = segment["words"]
-            if current_subtitle:
-                frame = draw_subtitle(frame, current_subtitle, subtitle_font_size, (255,255,255))
-            if current_info:
-                frame = draw_entries(frame, current_info, dictionary_font_size, (255,255,255))
-            frame_number += 1
-            if thumb is not None:
-                frame[y_offset:y_offset+thumb_h, x_offset:x_offset+thumb_w] = thumb
-            output.write(frame)
-        else:
+        if not ret:
             break
+
+        # advance cue pointer (cues are sorted by start frame)
+        while cue_idx < len(cues) and frame_number > cues[cue_idx]["end"]:
+            cue_idx += 1
+
+        if cue_idx < len(cues) and cues[cue_idx]["start"] <= frame_number <= cues[cue_idx]["end"]:
+            cue = cues[cue_idx]
+            if cue["overlay"] is not None:
+                composite_roi(frame, cue["overlay"], cue["bbox"])
+
+        if logo_roi is not None:
+            lx0, ly0, lx1, ly1 = logo_roi
+            frame[ly0:ly1, lx0:lx1] = thumb
+
+        output.write(frame)
+        frame_number += 1
 
     output.release()
     cap.release()
